@@ -1,0 +1,371 @@
+---
+title: Learnings from 200 Typelevel Microservices
+excerpt: Cats Effect and the Typelevel stack supports millions of daily visitors for ITV's streaming service ITVX - learn how we keep the estate legible, maintainable and correct
+author: tobias-roland
+publishedDate: 2025-06-31
+category: guide
+difficulty: intermediate
+tags: [scala, cats-effect, typelevel]
+---
+
+## Introduction
+
+In our excitement for the new, and in our potential disillusionment things may been in the past,
+we often forget to extol the virtues of what is working well now. What is, in fact, working *extremely* well.
+
+Scala 3, Cats-Effects (CE) and the wider Typelevel family is that **"it"** that is working well for us at ITV.
+
+My name is Tobias, and I am a tech lead at ITV, which is a public broadcaster and household name in the UK. Our video streaming service, ITVX, that I (and my half-hundred-or-so fellow backend
+scala devs) work on is held up by over 200+ microservices; mostly Scala 3 (about 90%), entirely Typelevel. We serve millions of viewers on a regular day,
+and orders of magnitudes more than that during live sports events.
+
+:::tip
+
+None of this is dogma. Consider this more of... a baseline of "if you start here, you're off to a good start" - if
+you are finding yourself (or your team members) overwhelmed in the past with the CE/Typelevel stack, try it out for a spin and adjus this baseline recipe to what works for *you* and your domain.
+
+:::
+
+CE, and 'the Typelevel stack' in general, has a reputation of being illegible to newcomers and requiring an undue amount ofup-front learning from coders. I am here to categorically that this doesn't have to be the case.
+
+It's certainly possible to write arcane sphagetti-code with it, (I have seen so, and **done so myself** over the years). A lot of what people seem to rail against stem more from conventions and historical ways, *patterns*, we inherited from our FP-roots that, maybe, Scala has a more Scala native way to express, than copying what Haskell did & does. Because an effect framework is so general-purpose, it's easy to use and abuse.
+
+## Our Island of Stability
+
+I think most long-lived companies coding Scala operating in a healthy manner eventually finds themselves on an "island of stability" - having a common stack of libraries and practices that just quietly works for them. When this happens, we often forget to do advocacy - it is our new normal, it becomes our bread-and-butter day-to-day-nothing-to-shout-about. Except, actually - we **should** shout about it!
+
+During my nearly six years at ITV, I've personally observed the ebb and flow of decisions and patterns that have and have not made it into our regular set of practices. I've read, evaluated and contributed to the advice we give each-other on slack, in person and on Pull Request Reviews. I am going to try and distill these learnings into a set of... well, not quite "best practices", because I think "best" is subjective and situational. Call it... practices that youcould consider a baseline to start from, a set of patterns that I have come to believe have made us quite successful and productive.
+
+
+## Reduce cognitive load
+
+A very key philosophy I want to really get across before diving into concrete advice, is an obsessive drive to **reduce cognitive load** - both for yourself when writing the code, but especially focused on future readers of the code. A really helpful mental technique for me has been to try and **think of code more like literature than math**. This is **explicitly** not me advising you to "add an outrageous amount of comments, scaladocs or long method names" - but instead to try and structure and write code in a way that welcomes newcomers and helps guide them towards using what you've built, to be able to build upon it or refactor it easily and safely.
+
+Take the extra time before you check it your code, before you raise that Pull Request, to ensure that states its purpose so clearly and that it is easy for readers and newcomers to pick up. Leave the camp ground cleaner than you found it.
+
+
+##  On mixing and matching frameworks
+
+I've noticed for people like myself - from a non-scala but still-JVM background - that the initial understanding of an effect library is a hurdle.
+It's not JUST a library you pull in to do one specific thing. By selecting an effect library, you're extending the base language more than just a set of new methods to call that returns a calculation for you - you're in fact pulling in a whole set of programming LEGO bricks to build with, and that fundamentally changes how your service code is written throughout. It requires a shift in your perception. A framework is "A Big Thing ™️", it *is* opinionated.
+
+_THE_ main thing we have gotten right at ITV over the years is to **stick to one stack**. When you open a service, you don't find Typelevel AND Play framework, Pekko, Zio, Monix or any other large frameworks mixed in. I know for sure there is a productive stack to be made with any one of the other frameworks mentioned, yet I'm entirely certain that in those cases, too, mixing and matching frameworks is a mistake. It _will_ cause a huge amount of cognitive overhead, both in the short term and long term, and cause maintenance nightmares.
+
+A "bread and butter" microservice at ITV will usually looks something like the following. These aren't the only libraries we use - far from it - but they're libraries you will be more likely to find in our stack than not.
+
+- `Scala LTS` - sticking to the Long Term Support version ensures IDE compatability and avoids cutting ourselves on the bleeding edge.
+- `sbt` - hugely stable, very flexible
+- `ciris` and/or `pureconfig` for loading configuration at service startup
+- `circe` for JSON
+- `cats` & `cats-effects` is the backbone for everything, providing the general programming constructs everything is centered around
+- `doobie` for SQL
+- `fs2`, `fs2-kafka` for streaming, for "doing things infinitely"
+- `log4cats` for logging
+- `http4s` for our Http needs
+- `scalatest` or `munit` for testing (munit is simpler but scalatest has a lot of functionality - I flip-flop between which one I prefer - both are entirely battle-tested and stable)
+- `scalacheck` for proprety driven testing (very worthwhile)
+- `testcontainers` for deterministic integration tests
+
+There are many more phenomenal libraries we make use of, but they mostly all rely on primitives from the libraries above.
+
+## On instantiating logic
+
+When it comes to instantiating business logic, I have a strong preference for traits with companion objects. The
+fact that this trait does something effectful is expressed at the trait level completely generically with a `F[_]`
+
+```scala 3
+// === Do ===
+// Do specify that "This trait is effectful" with a [F[_]]
+trait ContentPublisher[F[_]] {    // Do this
+  def publishEpisode(episode: Episode): F[Either[PublishingError, Unit]]
+}
+
+// ===  DO NOT ===
+trait ContentPublisher {
+  // do not specify the F[_] at the method level
+  def publishEpisode[F[_]](episode: Episode): F[Either[PublishingError, Unit]] // Don't do this
+}
+
+// === DO NOT ===
+// do not specify typeclasses in traits
+trait ContentPublisher[F[_]: Parallel] {
+  def publishEpisode(episode: Episode): F[Either[PublishingError, Unit]]
+}
+```
+completely devoid of logic, no specific capabilities provided at the trait level.
+
+We save that for the implementation. For implementation, prefer a method on a companion object to a class. Classes are easy to accidentally code against. A common review note for graduates and juniors is that they've accidentally added a dependency against an implementation (`publisher: ContentPublisherImpl`) instead of the trait (`publisher: ContentPublisher`), and with a trait+companion-object-with-apply pattern, we ensure that coders can only depend on the trait;  because there simply *is* no`...Impl` to accidentally rely on.
+
+The reason I find this helpful, is that it gently guides the coder towards a certain type of useage, which in turn leads to a very tangible consistency throughout the application.
+
+```scala 3
+/** Because there is only one implementation
+* in this microservice of ContentPublisher... */
+object ContentPublisher {
+
+  /** ... then we use the `apply` method, since
+  * there's no need to give a specific name to the implementation
+  *
+  * Note that we only put the smallest effects necessary to
+  * implement the business code in the context bound on F[_] below.
+  * This helps us see at a glance how "powerful" this code is going to
+  * be, it sets the context for what we are about to read.
+  * - typically, the only types that "go on the F" are from cats/cats-effects.
+  * This keeps the cognitive burden for a newcomer to the code low(er).
+  *
+  * Because this implementation doesn't live as a
+  * `class ContentPublisherImplementation {}`,
+  * it is impossible for other people to specify the dependency on this
+  * specific implementation - they can only specify a dependency on the interface (trait).
+  */
+  def apply[F[_]: MinimalEffectNeeded: MaybeSomeOtherEffectToo](
+    /* all the other dependencies are passed explicitly */
+    publisher: Publisher[F],
+    translator: EpisodeTranslator[F],
+
+   /* the `apply` method does NOT return `F[ContentPublisher]` nor
+     `Resource[F, ContentPublisher[F]]` - just `ContentPublisher[F]`.
+     If it WAS being returning something wrapped in Resource or F,
+     that would indicates a good candidate for refactoring.
+     If the ContentPublisher would need to do something effectful
+     to instantiate itself, that's a sign that you should extract that
+     out and pass it in as an argument like the publisher or translator above instead. */
+  ): ContentPublisher[F] = new ContentPublisher[F] {
+      /*  */
+      override def publishEpisode(episode: Episode): F[Either[PublishingError, Unit]] =
+        translator
+          .translateEpisode(episode)  // F[EpisodeMessage]
+          .flatMap(publisher.publish) // F[Either[PublishingError, Unit]]
+    }
+}
+```
+
+In cases where there are multiple implementations of the same trait, we abandon the singular `apply` - since there now actually ARE different ways to instantiate the trait - and instead provide specifically named methods. If you manage to keep your traits fairly small, just putting them in the companion object is fine:
+
+```scala 3
+object ContentPublisher {
+   def kafka[F[_]: FlatMap](
+     someDependency: SomeDependency[F]
+   ): ContentPublisher[F] = ???
+
+   def sqs[F[_]: FlatMap: Parallel](
+     someOtherDependency: SomeOtherDependency[F]
+   ): ContentPublisher[F] = ???
+}
+```
+
+...but for legibility as the project grows, you may want to specify separate objects:
+
+```scala 3
+object KafkaContentPublisher {
+   def apply[F[_]: FlatMap](
+     someDependency: SomeDependency[F]
+   ): ContentPublisher[F] = ???
+}
+```
+.. possibly even in separate files, if these grow large.
+
+```scala 3
+object SqsContentPublisher
+   def sqs[F[_]: FlatMap: Parallel](
+     someOtherDependency: SomeOtherDependency[F]
+   ): ContentPublisher[F] = ???
+}
+
+```
+
+Some will by now have recognised this as a pattern as what is known as 'tagless final', or even more jargon-y as 'tagless final encoding'. I think this naming is unfortunate, and one of the haskellisms we've inherited that makes it fairly hard to talk to "normal" coders. Once you know the term, you can (and should!) use it to talk to other people who know the term, but when dropping it into a conversation with a more general population of coders, it comes across as an arcane invocation of jargon. Be careful of this, especially with large teams and with people who aren't from a hardcore FP-background.
+
+I typically try and teach the mechanics of it, before revealing to people that that is what tagless final is - because outside of its mathsy name, it really is just specifying the capabilities that you need on the `F[_]`. Ignore the scary name and think of it as how to write abstract (tagless) code and supplying the concrete details about where those abstract capabilities come from later(final)
+
+:::note
+
+'Tagless Final' - is the general term for this pattern. If you look at the `apply` methods in the code above, it is Tagless in the sense that our apply-method is defined not against a specific "tag" (typically "IO"), but abstractly against JUST the *capabilities* or *effects* we require to implement our logic. We only ask for as much power as we need to do our implementation (for instance, `F[_]: Parallel` if we need access to parallel processing functionality in our implementation). Our traits are even less 'tagged', being completely oblivious to any typeclasses on their `F[_]`.
+
+For our purposes, then:
+
+* **Tagless**: writing code against an abstract effect type `F[_]` and specifying required capabilities via typeclasses (e.g., `[F[_]: Parallel]`)
+* **Final**: Providing the concrete effect type (the "tag," most commonly cats.effect.IO) at the application's entry point.
+
+:::
+
+The "Final" part of name is because we only specify what our tag is at the "end of the world", when we supply it at the 'final' edge of our application - in our `Main.scala`.
+
+## Main / Service / Resources
+
+To that end, a common service pattern is `Main` / `Service` / `AppResources` separation for service instantiation.
+
+`Main.scala` exists _main_-ly to go from a non Cats Effect aware programming world, into a Effectful application. It instantiates Service.scala (and handles the last log, in case something goes wrong) and rarely much more.
+
+```scala
+/** Instantiate ServiceName with the concrete IO effect and handle/log any fatal errors */
+object Main extends IOApp {
+
+  // this is the only place you'll see a concrete `IO` in the entire application
+  // ... well, outside of test code, perhaps.
+
+  val log: Logger[IO] = Slf4jLogger.getLoggerFromClass[IO](this.getClass)
+
+  override def run(args: List[String]): IO[ExitCode] =
+    Service[IO].handleErrorWith {
+      case err => log.error(err)("Service ServiceName terminated with error").as(ExitCode.Error)
+    }
+}
+```
+
+`AppResources.scala`, or sometimes just 'Resources.scala'; contains the lifetime resources for the application. A `Resource` in Cats Effect terms is a 'thing' that can be opened, can be used, and should be closed again when you're done using it.
+The usual example people give is a file that is opened, then text can be written to it, and it's closed again.
+
+```scala
+val myFileResource: Resource[F, MyFile]] = someSortOfFileResource()
+
+myFileResource
+   // the `Resource` .use method opens the file on disk
+  .use { (file: MyFile) =>
+    // While within the scope, we have access to the file -
+   // more generically, we have access to the A from Resource[F, A]
+    file.appendLineSaying("Hello World!")
+  }
+  //... and now the file gets closed again, and we can't access the file ("A") any longer
+```
+
+`Resource` is one of the most important Cats Effect constructs for real world application building.
+Consider that the File should be opened at service startup, used as long as the service is running, and closed when the service shuts down again.
+That is actually the case for a lot of things, not just files - things like Database transactors, kafka connections, http clients. With
+the pattern of `AppResource` pattern, we centralize the resources into ONE location in the app - AppResources.scala
+
+```scala
+// We have a case class with all the things that should
+// remain open for the duration of the app lifetime.
+final case class AppResources[F[_]](
+  dbTransactor: Transactor[F],
+  httpClient: HttpClient[F],
+  metricsMonitor: MetricsMonitor[F],
+  redisClient: RedisClient[F]
+)
+object AppResources {
+
+  def apply[F[_]: TheSmallestEffectNecessary](serviceConfig: ServiceConfig): Resource[F, AppResources[F]] = for {
+    dbTransactor   <- Transactor[F](serviceConfig.transactorConf)         // A method that returns a Resource[F, Transactor[F]]
+    httpClient     <- makeHttpClient[F](serviceConfig.httpConf)     // A method that returns a Resource[F, HttpClient[F]]
+    metricsMonitor <- makeMetricsMonitor[F](serviceConfig.metricsConf) // A... well you get the drift.
+    redisClient    <- makeRedisClient[F](serviceConfig.redisConf)
+
+    // These are often from 3rd-party libraries - it's very common within
+    // the typelevel family that HttpClients, Database Transactors and
+    // so forth will have a method to instantiate "something" as a
+    // `Resource[F, SomeSortOfThingThatProbablyShouldLiveForTheLifeOfTheApp[F]]`.
+
+    // Don't add things here that aren't resources. If a thing doesn't need to be a Resource,
+    // you should instantiate it in `Service.scala` instead. Keep the purpose of AppResources really clear -
+    // it's where you instantiate things that have a lifecycle.
+  } yield AppResources[F](
+    dbTransactor = dbTransactor,
+    httpClient = httpClient,
+    metricsMonitor = metricsMonitor,
+    redisClient = redisClient
+  )
+}
+```
+
+`Resource[F, AppResources[F]]` looks intimidating if you are not well-versed in CE yet. But it's super key to understand.
+The apply method returns a case class that is *itself* is wrapped in a `Resource` - because all this really is, is a convenient way to
+combine all of your resources into one case class to make it easy to open and close all of them at at the same time.
+
+If we were to rewrite our example of using a file from earlier:
+
+```scala
+val myResources: Resource[F, AppResources[F]] = AppResources[F]
+
+// outside of the `.use`, we don't have access to the internals of the
+// AppResource case class with all our lifetime-of-the-app
+// dependencies that need to be opened and closed...
+// ... because they haven't been "opened" yet.
+myResources
+  .use {
+    case AppResources(
+      dbTransactor: Transactor[F],
+      httpClient: Client[F],
+      metricsMonitor: MetricsMonitor[F],
+      redisClient: RedisClient[F]
+    ) => ??? // now we can use them to our hearts content
+}
+// and now they've all been closed again
+```
+
+`Service.scala` - that usage is actually pretty close to how we make use of it. 'Service.scala', or sometimes 'Server.scala',
+is where we USE the resources to instantiate our service logic by calling the `apply` methods of the companion objects for the traits.
+
+```scala
+
+/** There is no trait here - the Service only
+* contains an `apply` method which will effectively
+* run forever until terminated (at which point it returns an Exit-code)
+*
+*
+* Don't bother splitting this into smaller functions - the `use` part of the resources.use
+* is really where everything happens in here.
+*
+* It doesn't really matter if this grows to a few hundred lines of instantiating - the
+* combined
+* instantiation together makes it easier to see how everything is wired.
+* */
+object Service {
+
+  def apply[F[_]: Async: Parallel: Network]: F[ExitCode] = for {
+    config    <- ServiceConfig.load[F]                  // : ServiceConfig, drawn from F[ServiceConfig]
+    resources = AppResources[F](serviceConfig = config) // : Resource[F, AppResources[F]]
+    exitCode  <- resources.use { (r: AppResouces) => {  // : ExitCode, drawn from F[ExitCode] which is what `.use` returns (see below)
+
+                  // Now we can actually assemble all of our logic.
+                  // effectively, this is 'manual dependency injection'
+                  val petDatabase: PetDatabase[F](
+                    transactor = r.dbTransactor,
+                    cache = r.redisClient
+                  )
+                  val petLookup: PetLookup[F] = PetLookup[F](
+                     db = petDatabase
+                  )
+
+                 }
+               }
+  } yield exitCode
+
+
+}
+
+
+```
+
+```text
+com.example.servicename
+   Main.scala
+   Service.scala
+   AppResources.scala
+```
+
+
+
+I believe automated Dependency Injection adds cognitive overhead. If I jump into a microservice I haven't worked in before, it's really nice to be able to trace through exactly what is being passed as an argument to what. The onboarding experience is simple.
+
+I like a service that's fairly explicit, and to that end, I want to be able to open up a service and immediately see how things are glued together.
+
+Things are instantiated at one point in time, during startup, runs till the service is shut down. Instantiation is a one-time concern, and it doesn't add significant development time to instantiate a thing in Service.scala and pass it as an arg where needed. The benefit of the explicitness is immediate clarity - there is no "oh you need to know how dependencies are resolved" or potential conflicts pulling dependencies out of implicit scopes.
+
+
+* `AppResources.scala` - contains a `case class AppResources(...)` which contains EVERY resources that needs to exist for the duration of the application running.
+* `Service.scala` - instantiates the `Resources` case class, and uses those resources to instantiate the app and all the logic and services.
+* `Routes.scala` - instantiates the HTTP4S routes
+
+
+## Enforce formatting automatically
+Bikeshedding formatting is one of the most tedious things I know, and Scala 3 brought a plethora of ways to make scala code look'n'feel. Without automatic enforcement of a style, people will inevitably spend time bikeshedding it and you know... I think life is too short to debate tabs vs spaces. Pick a style and stick with it - as before, do not Mix-and-Match within the same service. Make sure the compiler and scalafmt are rewriting it automatically. I personally have a preference for brackets, so I have the following in my build.sbt in addition to scalafmt configuration.
+
+```text
+// Ensures whitespace is rewritten to use brackets
+scalacOptions ++= Seq("-rewrite", "-no-indent")
+```
+
+... if you prefer whitespace and/or endmarkers, that's cool too. I'm not here to advocate for my preference, but I AM here to advocate making the preference be enforced by code. If people want to bikeshed formatting, at least they can keep it to bikeshedding the `.scalafmt.conf` file instead of blocking a feature from being deployed to production!
+
+

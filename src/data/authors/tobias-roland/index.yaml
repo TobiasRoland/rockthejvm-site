@@ -1,0 +1,14 @@
+biography:
+  Originally from Denmark, Tobias now lives and works in London as a lead engineer on the the UK public broadcaster ITV's streaming service ITVX, where he is the tech lead for the content and personalisation teams. Outside of coding, spends his time whispering to plants, hitting the drums, and playing D&D
+company:
+  entity: itvx
+  role: Tech Lead
+location:
+  city: London
+  country: United Kingdom
+name: Tobias Roland
+photo: ./photo.png
+socials:
+  github: TobiasRoland
+  linkedin: tobiasroland
+  website: https://mostly.codes
